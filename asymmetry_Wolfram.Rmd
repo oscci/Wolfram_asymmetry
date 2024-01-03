@@ -1,0 +1,307 @@
+---
+title: "Asymmetry from Wolfram"
+output: html_notebook
+---
+
+Background:   
+https://reintech.io/blog/cellular-automata-with-r-tutorial
+
+for application to neurobiology 
+http://neurosphere.cos.northeastern.edu/neurosphere
+
+Needs SDMTools which is not on CRAN. 
+install.packages("remotes")
+remotes::install_version("SDMTools", "1.1-221")
+require(SDMTools)
+
+Explored idea on 31/12/23 with cellularautomata.rmd
+
+Starting fresh script on 1/1/24, removing the obsolete bits and reordering.
+
+
+```{r loadpackages}
+# Install and load necessary packages
+
+library(ggplot2)
+library(tidyverse)
+library(reshape2) #for melting arrays into long form
+library(raster) #for computing areas of adjacent cells
+library(SDMTools) #not on CRAN - see above for how to install - also for area counting
+
+
+
+```
+
+
+Basic idea is that, even for bilateral tasks, there will be lateralisation.
+So need a rule that encourages cluster to form but not across midline.
+So for one dimension, x, cluster into 1-20 or 21-40
+
+Try this rule: start at time with only about 20% of grid positions on, at random.
+
+Time 2: if any neighbour was on at t1, go on, unless neighbour crosses midline, in which case, nothing happens.
+
+
+```{r definerule}
+#We have n cycles (timepoints, t).
+#Rule determines state at t(n), based on neighbours at t(n-1).
+#Variable ngreaterthan used to decide how many neighbours trigger a change.
+#Midline is a flag that is 1 if midline neighbours are ignored, 0 otherwise.
+#Zeromidline is a flag that sets all midline cells to zero at start of function (if flag is 1)
+
+#lbias is a flag that, if set to 1,  only increments grid on 1st round for cell type 1 on L side
+#ncelltype is just the number of cell types specified: these obey the rule independently of one another
+#neighbourtype is 4 or 8; this allows for rule to apply to only 4 neighbours (above/below and left/right), or else to include diagonals to give 8 neighbours
+
+neighbourrule<-function(grid,ngreaterthan,midline,zeromidline,lbias,celltype,neighbourtype){
+  nugrid<-grid #initialise nugrid with initial array
+  nr<-dim(grid)[1] #number of rows
+  nc<- dim(grid)[2] #number of columns
+  midpoints<-c(round(nr/2,0),(1+round(nr/2,0))) #x-axis is L-R dimension; we identify the middle points which are regarded as R edge of L side, and L edge of R side
+  if(zeromidline==1){
+    grid[midpoints,]<-0 #turn off midline points if zeromidline flag set to 1
+  }
+  lasti <- nr-1 #loop by default goes up to penultimate x axis point
+  if(lbias==1)
+  {lasti <- midpoints[1]} #loop stops at end of L side if lbias is set to 1}
+  #Now loop through checking each cell against the rule
+  for (i in 2:lasti){
+    for (j in 2:(nc-1)){
+      thiscell <- grid[i,j]
+      neighbours <- c(grid[(i-1),j],grid[(i+1),j],grid[i,(j-1)],grid[i,(j+1)])
+      if (neighbourtype==8){
+         neighbours <- c(neighbours, grid[(i-1),(j-1)],grid[(i+1),(j+1)],grid[(i+1),(j-1)],grid[(i-1),(j+1)])
+      }
+      if(midline==1){
+        if(i==midpoints[1]){
+          neighbours <- c(grid[(i-1),j],grid[i,(j-1)],grid[i,(j+1)])
+          if (neighbourtype==8){
+         neighbours <- c(neighbours, grid[(i-1),(j-1)],grid[(i-1),(j+1)])
+          }
+        }
+        if(i==midpoints[2]){
+          neighbours <- c(grid[(i+1),j],grid[i,(j-1)],grid[i,(j+1)])
+          if (neighbourtype==8){
+         neighbours <- c(neighbours, grid[(i+1),(j-1)],grid[(i+1),(j+1)])
+          }
+        }
+      }
+      w<-vector()
+      for (cell in 1:celltype){
+        
+      w[cell]<-length(which(neighbours==cell))
+      }
+
+      if((lbias==1)&(celltype>1)){w[2:celltype]<-0} 
+      #ignore cells with value greater than 1 if lbias flag is set
+    
+      maxn <- max(w)
+      
+      thistype<-which(w==maxn)
+      if(length(thistype)>1){thistype<-sample(thistype,1)}
+      #find which has max; use sample in case there's more than one match - if so, just select at random
+      
+      if(maxn>ngreaterthan)
+      {
+        nugrid[i,j]<-thistype
+      }
+
+    }
+  }
+  return(nugrid)
+
+}
+```
+
+```{r rotategrid}
+#Comparison of images and the underlying grid shows that 'image' rotates the grid!  I'm now confused, because the images do show the central midline blank on the correct axis.
+#But to make a matrix that looks like the image, you have to apply this function 3 times!
+
+rotate <- function(x) t(apply(x, 2, rev))
+
+
+
+```
+
+
+
+The countadjfunction counts area of largest patch on each side for each cell type.
+
+```{r countadjfunction}
+countadj<-function(grid){
+r <- raster(grid)    
+rc <- clump(r)
+as.matrix(rc)
+
+p <- PatchStat(rc)
+return(max(p$n.cell))
+}
+```
+
+Specify parameters for grid size, N time points, percentage cells active at time 1, n iterations, and n iterations to plot
+
+```{r setup2}
+nrow <- 30
+ncol <- 30
+ntimes<-16
+mypercent <- 20 #percentage active at time 1, whole number 1-100
+#if there are 2 types of cell, then this percentage is split between them
+
+niter <- 8
+lbiascycle <- 0 #time cycles where only L side class 1 cells change
+
+celltype <- 3 #how many cell types - used below for initial setup rather than in rule
+pcelltypes<-c(.7,.1,.1,.1) #first value is blank - then probs for types 1-celltype
+niterplot<-8 #we'll just save plots for first 8 iterations
+ngreaterthan <- 2 #N neighbours (out of 4) that need to be on
+midline<-0 #midline condition. If 1, don't count neighbours across midline
+zeromidline <- 1 #set midline points to zero
+neighbourtype <- 8 #can be 4 (von Neumann neighbourhood) or 8 (Moore)
+
+descriptor <-paste0('times',ntimes,'_dim',nrow,'x',ncol,'_p',mypercent,'[',celltype,']','_neighbourmorethan',ngreaterthan,'-neightype',neighbourtype,'_midlineruleon',midline,'_zeromidline',zeromidline,'_lbiascycles',lbiascycle) #used to retain parameters when saving plots
+
+#latdf used to save information about size of largest patches on L and R
+latdf<-data.frame(matrix(NA,ncol=20,nrow=niter))
+colnames(latdf)<-c('times','nrow','ncol','perc','ncelltype','Nneighb','neighbourtype','midflag','zeromidline','lbiascycle','Larea1','Rarea1','Larea2','Rarea2','LI1','LI2','zlat1','plat1','zlat2','plat2')
+
+
+myarray<-array(NA,dim=c(nrow, ncol, ntimes,niter)) #initialise array for grids
+
+ for (n in 1:niter){
+latdf[n,1:10]<-c(ntimes,nrow,ncol,mypercent,celltype,ngreaterthan,neighbourtype,midline,zeromidline,lbiascycle)
+myvector<-sample(c(0:celltype),nrow*ncol,prob=pcelltypes,replace=TRUE) #first time point, start by setting cell types according to pcelltypes probabilities
+
+
+myarray[,,1,n]<-myvector #first time point
+
+#now use neighbourrule to step through each time point; at each time, the grid is updated using the neighbourhood rule
+for (t in 1:(ntimes-1)){
+  grid<-myarray[,,t,n]
+  lbias<-0
+  if (t<=lbiascycle){lbias <-1} #lbias only on first timepoint - ignores all but cell value 1 on L
+  nugrid<-neighbourrule(grid,ngreaterthan,midline,zeromidline,lbias,celltype,neighbourtype)
+  myarray[,,(t+1),n]<-nugrid
+}
+
+if(celltype>1){ #ignore next steps if just one type - one type is just for illustration
+#For this iteration, we now compute area of largest patches on L and R
+#We first make separate grids for the two cell types by just setting other type to NA. We take the last iteration
+  grid1<-myarray[,,ntimes,n]
+  grid2<-myarray[,,ntimes,n]
+  for(i in 1:nrow){
+   for (j in 1:ncol){
+    if(grid1[i,j]==2) grid1[i,j]<-NA
+    if(grid2[i,j]==1) grid2[i,j]<-NA
+   }
+  }
+
+leftside<-1:round(nrow/2,0)
+rightside<-(1+round(nrow/2,0)):nrow
+latdf$Larea1[n]<-countadj(grid1[leftside,])
+latdf$Rarea1[n]<-countadj(grid1[rightside,])
+latdf$Larea2[n]<-countadj(grid2[leftside,])
+latdf$Rarea2[n]<-countadj(grid2[rightside,])
+
+} #next iteration
+
+
+
+#now convert values to zscores
+
+#expected proportion is .5
+for (n in 1:niter){
+nbit <- latdf$Larea1[n]+latdf$Rarea1[n] #total N cells in both hems for class 1
+latdf$LI1[n]<-(latdf$Larea1[n]-latdf$Rarea1[n])/nbit
+latdf$zlat1[n]<-((latdf$Larea1[n]/nbit)-.5)/sqrt(.5^2/nbit)
+latdf$plat1[n]<-pnorm(abs(latdf$zlat1[n]),mean=0,sd=1,lower.tail=FALSE)
+nbit <- latdf$Larea2[n]+latdf$Rarea2[n] #total N cells in both hems for class 1
+latdf$LI2[n]<-(latdf$Larea2[n]-latdf$Rarea2[n])/nbit
+latdf$zlat2[n]<-((latdf$Larea2[n]/nbit)-.5)/sqrt(.5^2/nbit)
+latdf$plat2[n]<-pnorm(abs(latdf$zlat2[n]),mean=0,sd=1,lower.tail=FALSE)
+
+} 
+save(list=c('latdf','myarray'),file=paste0(descriptor,'.Rdata')) #save simulated data
+
+}
+```
+
+
+
+```{r createfacetplots}
+
+#Get all the times in one long file, so can then use facet?
+
+longarray<-melt(myarray)  #yes!!
+#This creates long form data frame where Var1 is x, Var2 is y, Var3 is time point, and Var4 is iteration, and value is 0, 1 or 2 for that cell.
+
+#we will want 6 cols in the graphgrid, so select seq accordingly - i.e. we don't plot every time point - just a regular subset
+
+savetimes<-round(seq(from=1,to=ntimes,length.out=6),0) #gives 6 equally spaced time values for plotting
+w<-which(longarray$Var3 %in% savetimes)
+mybit3<-longarray[w,]
+mybit3<-filter(mybit3,Var4<(niterplot+1)) #we just plot 8 iterations
+
+#we create a factor, Cycle, that combines Var4 and Var3 for the labels - first digit is the run, and last 2 digits are the timepoint
+
+mybit3$Cycle<-as.factor(mybit3$Var4*100+mybit3$Var3)
+myg<-ggplot(mybit3,aes(Var1,Var2,fill=as.factor(value)))+
+  geom_tile()+
+  scale_fill_manual(values=c("#CCCCCC", "#FF3333", "#6600CC","yellow"))
+#grey is background; red for receptive, purple for production
+myg + facet_wrap(~Cycle, ncol=6)+
+  theme(legend.position='none')+
+  theme(axis.text.x=element_blank(),axis.text.y=element_blank(),axis.title=element_blank())
+  
+myplotname<-paste0("simplots/",descriptor,".pdf")
+ggsave(myplotname,width=5,height=8)
+
+#We now need to just create monster array with, say 8 runs with same conditions, and then plot in a bit 6 x 8 grid
+
+
+
+```
+
+This looks promising. 
+
+Further things to explore.
+1. How much variability is seen with the same set of rules on different runs - have now done routine to  plot the images for end of each run in a grid
+2. How does initial probability of activation at time 1 affect results?
+3. What if we make the rule probabilistic rather than deterministic?
+4. Which initial conditions would lead to lateralisation?  NB this initial simulation is more geared to just showing that you get lateralised clusters - for systematic asymmetry to one side would need some other influence.
+5. What if one class of cells was given a 'head start' - start the process of expansion one or more cycles before the other - my prediction is that it would come to predominate but should not affect laterality?
+6. If one side was given a 'head start' - given the lack of interaction between sides, I don't see that this would do anything other than to show clusters sooner on the privileged side.  I think the interest would be in giving one cell type a head start just on one side.
+7. On x-axis, could try privileging neighbours that are more to the extremes - so for L it would be x-1, and for R it would be x+1
+
+
+
+
+
+
+Interesting - with 40 runs doesn't give bigger patches - settles down to final pattern quite early - at around 20 timepoints 
+Try again with 30 timepoints
+
+So model looks OK with 30 timepoints and a 30 x 30 grid with prob of 20.
+
+With these settings, get nice big patches, which continue to grow, though in many iterations are already there within 11 timepoints. The size of blue or orange patches can look very asymmetric.
+
+So this is starting to look like desired pattern for the bilateral case - i.e. seldom true bilaterality.
+Not complementary - though that sometimes comes up by chance.
+
+So I guess I need to find a way of measuring the size of the larger patches - this would allow me to check asymmetry for both blue and orange. Expect that overall it will average out as 50% across runs, but within most runs, will be significant departure from asymmetry.
+
+Other thing is that usually some degree of true bilaterality - ie both sides implicated: it's just that one side has larger extent. This would be akin to what we observe with fTCD.
+
+Anyhow, next challenge is to measure areas. And I think this will be a challenge.
+
+So minimally, need a point which has same value on L, R and above and below.
+So go through identifying such points, and then extending outwards in all directions until mismatch
+
+
+Well, wonderful person on Mastodon pointed me to a solution to the area issue.
+https://stackoverflow.com/questions/49828805/find-size-of-maximum-connected-region-in-matrix
+
+
+So we can create a dataframe where we save from the each final run the 4 values: largest patch for L and R for 1s and 2s.
+
+
+
